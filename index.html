@@ -131,8 +131,10 @@
     // ★ 顔検出フラグ
     let faceDetected = false;
 
-    // ★ 測定開始時刻（最初の数百 ms は straight に固定するため）
-    let startTs = null;
+    // ★ 自動基準取り用（キャリブ未使用時に「測定開始直後の姿勢」を基準にする）
+    let autoBaseY = null, autoBaseZ = null;
+    let autoBaseCount = 0;
+    let autoBaseDone = false;
 
     // ======== 警告音（Web Audio） ========
     let audioCtx = null;
@@ -218,6 +220,18 @@
       sYdiff = (sYdiff == null) ? yDiff : PARAMS.alphaYdiff * yDiff + (1 - PARAMS.alphaYdiff) * sYdiff;
       sNoseZ = (sNoseZ == null) ? noseZ : PARAMS.alphaNoseZ * noseZ + (1 - PARAMS.alphaNoseZ) * sNoseZ;
 
+      // ★ キャリブなし＆保存基準なしのときは、最初の数フレームで自動的に基準を取る
+      if (!autoBaseDone && PARAMS.calibYdiff == null && PARAMS.calibNoseZ == null) {
+        autoBaseY = (autoBaseY === null) ? sYdiff : autoBaseY + sYdiff;
+        autoBaseZ = (autoBaseZ === null) ? sNoseZ : autoBaseZ + sNoseZ;
+        autoBaseCount++;
+        if (autoBaseCount >= 10) { // 約1秒分（10fps想定）
+          PARAMS.calibYdiff = autoBaseY / autoBaseCount;
+          PARAMS.calibNoseZ = autoBaseZ / autoBaseCount;
+          autoBaseDone = true;
+        }
+      }
+
       // 顔向き & 距離の分類
       const dir = classifyDirection();     // ← combined 判定
       faceState.dir = dir;
@@ -267,13 +281,6 @@
         combined = (sYdiff - PARAMS.calibYdiff) + (sNoseZ - PARAMS.calibNoseZ);
       } else {
         combined = (sYdiff ?? 0) + (sNoseZ ?? 0);
-      }
-
-      // ★ 測定開始直後 700ms は強制的に straight 扱い
-      if (startTs !== null && performance.now() - startTs < 700) {
-        wasDown = false;
-        wasUp   = false;
-        return 'straight';
       }
 
       if (!wasDown && combined < -0.04) { wasDown = true; wasUp = false; return 'down'; }
@@ -381,18 +388,16 @@
 
       await initCamera();
 
-      // ★ 測定開始時刻を記録（最初の 700ms は straight 固定）
-      startTs = performance.now();
-
-      // ★ 方向/距離ヒステリシスと状態をリセット
-      wasDown = false;
-      wasUp   = false;
-      wasClose = false;
-      wasFar   = false;
-      bentState  = false;
-      enterStart = null;
-      exitStart  = null;
+      // ★ 状態リセット
+      wasDown = false; wasUp = false; wasClose = false; wasFar = false;
+      bentState = false;
+      enterStart = null; exitStart = null;
       stopBeepLoop();
+
+      // ★ 自動基準用もリセット
+      autoBaseY = null; autoBaseZ = null;
+      autoBaseCount = 0;
+      autoBaseDone = false;
 
       // ★ ユーザー操作直後にオーディオを有効化（iOS自動再生制限対策）
       ensureAudio();
@@ -412,9 +417,15 @@
 
       const saved = loadCalibration();
       if (saved) {
-        PARAMS.calibYdiff = saved.y; PARAMS.calibNoseZ = saved.z;
+        // ★ 保存された基準がある場合はそれを優先し、自動基準は使わない
+        PARAMS.calibYdiff = saved.y;
+        PARAMS.calibNoseZ = saved.z;
+        autoBaseDone = true;
         setWarning(false, '測定中...');
       } else {
+        // 保存基準なし → 測定開始直後に自動基準を取る（PARAMS.calib* は一旦 null）
+        PARAMS.calibYdiff = null;
+        PARAMS.calibNoseZ = null;
         setWarning(false, '測定中...');
       }
 
@@ -435,12 +446,24 @@
       if (sYdiff == null || sNoseZ == null) return;
       PARAMS.calibYdiff = sYdiff; PARAMS.calibNoseZ = sNoseZ;
       saveCalibration(PARAMS.calibYdiff, PARAMS.calibNoseZ);
+
+      // 手動キャリブを押したら、自動基準は完了扱いにして上書き
+      autoBaseDone = true;
+      autoBaseY = autoBaseZ = null;
+      autoBaseCount = 0;
+
       setWarning(false, 'ニュートラルを登録しました');
     }
 
     function resetCalibration(){
       PARAMS.calibYdiff = null; PARAMS.calibNoseZ = null;
       localStorage.removeItem('posture-calib');
+
+      // ★ 自動基準もリセット（解除後はそのときの姿勢を新しい基準として取り直し）
+      autoBaseY = autoBaseZ = null;
+      autoBaseCount = 0;
+      autoBaseDone = false;
+
       setWarning(false, 'キャリブを解除しました');
     }
 
