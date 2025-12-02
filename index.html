@@ -203,7 +203,7 @@
     const PARAMS = {
       alphaPitch: 0.25, alphaRoll: 0.25, alphaYdiff: 0.3, alphaNoseZ: 0.25,
       calibYdiff: null, calibNoseZ: null,
-      // 既存しきい値（距離・ヒステリシス等で使用）
+      // しきい値（距離・ヒステリシス等）
       absExitBand: 0.02,
       closeEnter: -0.035, closeExit: -0.015, farEnter: 0.020, farExit: 0.005,
       absCloseEnter: -0.15, absFarEnter: -0.10, absZExitBand: 0.02,
@@ -505,10 +505,11 @@
       canvas.width = video.videoWidth; canvas.height = video.videoHeight;
     }
 
-    // 測定開始：保存済みキャリブを読み込みつつ開始
+    // ★ 測定開始：毎回「キャリブなし＋状態リセット」でスタート
     async function startAll(){
-      // 傾きセンサの許可
-      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+      // 1. 傾きセンサの許可
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
         try {
           const res = await DeviceOrientationEvent.requestPermission();
           if (res === 'granted') {
@@ -525,11 +526,13 @@
         window.addEventListener('deviceorientation', handleOrientation);
       }
 
+      // 2. カメラ起動
       await initCamera();
 
-      // オーディオ有効化
+      // 3. オーディオ有効化（iOS対策）
       ensureAudio();
 
+      // 4. MediaPipe Camera 起動
       camera = new Camera(video, {
         onFrame: async () => {
           const t = performance.now();
@@ -541,26 +544,45 @@
       });
       camera.start();
 
-      // キャリブモードだけリセット
+      // 5. ★ここから完全リセット★
+
+      // キャリブ値をリセット（＝キャリブなし状態）
+      PARAMS.calibYdiff = null;
+      PARAMS.calibNoseZ = null;
+      // 保存済みキャリブも消す（毎回リセットしたい仕様なので）
+      try { localStorage.removeItem('posture-calib'); } catch {}
+
+      // 3秒キャリブ用の状態リセット
       calibMode = false;
       calibSamples = [];
       calibStartTs = 0;
 
+      // ヒステリシス・首状態リセット
+      wasDown  = false;
+      wasUp    = false;
+      wasClose = false;
+      wasFar   = false;
+      bentState  = false;
+      enterStart = null;
+      exitStart  = null;
+      stopBeepLoop();
+
+      // 平滑値も初期化
+      sPitch = 0;
+      sRoll  = 0;
+      sYdiff = null;
+      sNoseZ = null;
+      faceState = { dir: 'straight', prox: '通常距離' };
+
+      // ボタン状態
       startBtn.disabled = true;
       calibBtn.disabled = false;
       resetBtn.disabled = false;
 
-      // 保存済みキャリブがあればロード
-      const saved = loadCalibration();
-      if (saved) {
-        PARAMS.calibYdiff = saved.y;
-        PARAMS.calibNoseZ = saved.z;
-      } else {
-        PARAMS.calibYdiff = null;
-        PARAMS.calibNoseZ = null;
-      }
+      // 表示：毎回、キャリブなしで測定中
       setWarning(false, '測定中...');
 
+      // 6. タブ非表示で一時停止／復帰
       document.addEventListener('visibilitychange', () => {
         if (!camera) return;
         if (document.hidden) {
@@ -584,29 +606,25 @@
       setWarning(false, '良い姿勢で3秒間そのまま静止してください');
     }
 
-    // ★ 解除：測定開始直後と同じ「キャリブなし判定状態」に戻す
+    // 解除：キャリブと状態をリセット（キャリブなし測定中に戻す）
     function resetCalibration(){
-      // キャリブ値を初期化（＝キャリブなし状態）
+      // キャリブ値を初期化
       PARAMS.calibYdiff = null;
       PARAMS.calibNoseZ = null;
 
-      // 進行中のキャリブモードも終了
+      // キャリブモード終了
       calibMode = false;
       calibSamples = [];
       calibStartTs = 0;
 
-      // ローカル保存も削除（次回開始時もキャリブなし）
-      try {
-        localStorage.removeItem('posture-calib');
-      } catch {}
+      // 保存済みキャリブ削除
+      try { localStorage.removeItem('posture-calib'); } catch {}
 
-      // ヒステリシス状態もリセット
+      // ヒステリシス・首状態リセット
       wasDown  = false;
       wasUp    = false;
       wasClose = false;
       wasFar   = false;
-
-      // 首曲がり状態・タイマーもリセット
       bentState  = false;
       enterStart = null;
       exitStart  = null;
@@ -614,7 +632,7 @@
       // ビープ停止
       stopBeepLoop();
 
-      // 表示も「キャリブなしで測定中」に戻す
+      // 表示
       setWarning(false, 'キャリブを解除しました（現在はキャリブなしで測定中）');
     }
 
